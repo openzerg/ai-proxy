@@ -1,12 +1,13 @@
 FROM oven/bun:alpine AS builder
+RUN apk add --no-cache git
 WORKDIR /app
+COPY common /common
+RUN cd /common/common-spec && bun install
 COPY ai-proxy/package.json ai-proxy/bun.lock* ./
-COPY common/common-spec /common-spec
 RUN bun install
 COPY ai-proxy/src/ src/
 COPY ai-proxy/tsconfig.json ./
 RUN bun build --compile src/main.ts --outfile ai-proxy
-
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
