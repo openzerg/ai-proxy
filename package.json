@@ -9,7 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@openzerg/common": "file:../common/common-spec",
+    "@openzerg/common": "github:openzerg/common#main",
     "@bufbuild/protobuf": "^2.11.0",
     "@connectrpc/connect": "^2.1.1",
     "@connectrpc/connect-node": "^2.1.1",
