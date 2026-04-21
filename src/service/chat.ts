@@ -1,7 +1,8 @@
 import { ResultAsync, okAsync, errAsync } from "neverthrow"
-import type { DB } from "../db/index.js"
-import { dbQuery } from "../db/index.js"
-import { createLogsService } from "./logs.js"
+import { gelQuery } from "@openzerg/common/gel"
+import type { GelClient } from "@openzerg/common/gel"
+import { getProxyBySourceModel } from "@openzerg/common/queries"
+import { createLogsService, type LogInsertInput } from "./logs.js"
 import type { ProxyJoined } from "./proxy.js"
 import {
   UnauthenticatedError, NotFoundError, UpstreamError,
@@ -36,12 +37,12 @@ function extractBearerToken(req: Request): string {
   return header.startsWith("Bearer ") ? header.slice(7).trim() : ""
 }
 
-export function createChatService(db: DB) {
-  const logsSvc = createLogsService(db)
+export function createChatService(gel: GelClient) {
+  const logsSvc = createLogsService(gel)
 
   return {
     async openaiPassthrough(req: Request): Promise<Response> {
-      return runPipeline(req, db, logsSvc).catch(
+      return runPipeline(req, gel, logsSvc).catch(
         e => new Response(
           JSON.stringify({ error: { message: String(e), type: "server_error" } }),
           { status: 502, headers: { "Content-Type": "application/json" } },
@@ -51,9 +52,34 @@ export function createChatService(db: DB) {
   }
 }
 
+function rowToProxyJoined(row: NonNullable<Awaited<ReturnType<typeof getProxyBySourceModel>>>): ProxyJoined {
+  return {
+    id: row.id,
+    sourceModel: row.sourceModel,
+    providerModelConfigId: row.providerModelConfig.id,
+    apiKey: row.apiKey,
+    enabled: row.enabled,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    providerId: row.providerModelConfig.providerId,
+    providerName: row.providerModelConfig.providerName,
+    modelId: row.providerModelConfig.modelId,
+    modelName: row.providerModelConfig.modelName,
+    upstream: row.providerModelConfig.upstream,
+    targetModel: row.providerModelConfig.modelId,
+    supportStreaming: row.providerModelConfig.supportStreaming,
+    supportTools: row.providerModelConfig.supportTools,
+    supportVision: row.providerModelConfig.supportVision,
+    supportReasoning: row.providerModelConfig.supportReasoning,
+    defaultMaxTokens: row.providerModelConfig.defaultMaxTokens,
+    contextLength: row.providerModelConfig.contextLength,
+    autoCompactLength: row.providerModelConfig.autoCompactLength,
+  }
+}
+
 async function runPipeline(
   req:     Request,
-  db:      DB,
+  gel:     GelClient,
   logsSvc: ReturnType<typeof createLogsService>,
 ): Promise<Response> {
   const result = await parseBody(req)
@@ -63,55 +89,15 @@ async function runPipeline(
       return okAsync({ body, token })
     })
     .andThen(({ body, token }) =>
-      dbQuery(() =>
-        db.selectFrom("ai_proxy_proxies")
-          .innerJoin("ai_proxy_provider_model_configs", "ai_proxy_proxies.providerModelConfigId", "ai_proxy_provider_model_configs.id")
-          .select([
-            "ai_proxy_proxies.id",
-            "ai_proxy_proxies.sourceModel",
-            "ai_proxy_proxies.apiKey",
-            "ai_proxy_proxies.providerModelConfigId",
-            "ai_proxy_proxies.enabled",
-            "ai_proxy_proxies.createdAt",
-            "ai_proxy_proxies.updatedAt",
-            "ai_proxy_provider_model_configs.providerId",
-            "ai_proxy_provider_model_configs.providerName",
-            "ai_proxy_provider_model_configs.modelId",
-            "ai_proxy_provider_model_configs.modelName",
-            "ai_proxy_provider_model_configs.upstream",
-            "ai_proxy_provider_model_configs.modelId as targetModel",
-            "ai_proxy_provider_model_configs.supportStreaming",
-            "ai_proxy_provider_model_configs.supportTools",
-            "ai_proxy_provider_model_configs.supportVision",
-            "ai_proxy_provider_model_configs.supportReasoning",
-            "ai_proxy_provider_model_configs.defaultMaxTokens",
-            "ai_proxy_provider_model_configs.contextLength",
-            "ai_proxy_provider_model_configs.autoCompactLength",
-            "ai_proxy_provider_model_configs.apiKey as upstreamApiKey",
-          ])
-          .where("ai_proxy_proxies.sourceModel", "=", body.model)
-          .where("ai_proxy_proxies.enabled", "=", true)
-          .executeTakeFirst()
+      gelQuery(() =>
+        getProxyBySourceModel(gel, { sourceModel: body.model })
       ).andThen(row => {
         if (!row) return errAsync(new NotFoundError(`no proxy for model: ${body.model}`))
-        const proxyApiKey = row.apiKey
-        if (proxyApiKey !== token)
+        const proxy = rowToProxyJoined(row)
+        if (proxy.apiKey !== token)
           return errAsync(new UnauthenticatedError("invalid API key"))
-        const { upstreamApiKey, ...rest } = row
-        const proxy: ProxyJoined = {
-          ...rest,
-          targetModel: rest.targetModel,
-          createdAt: BigInt(rest.createdAt),
-          updatedAt: BigInt(rest.updatedAt),
-        }
+        const upstreamApiKey = row.providerModelConfig.apiKey
         return okAsync({ body, proxy, upstreamApiKey })
-      })
-    )
-    .andThen(({ body, proxy, upstreamApiKey }) =>
-      okAsync({
-        body,
-        proxy,
-        upstreamApiKey,
       })
     )
     .andThen(({ body, proxy, upstreamApiKey }) =>
@@ -158,8 +144,8 @@ async function runPipeline(
   }
 
   const json = await resp.json() as { usage?: { prompt_tokens: number; completion_tokens: number } }
-  const inputTokens  = BigInt(json.usage?.prompt_tokens     ?? 0)
-  const outputTokens = BigInt(json.usage?.completion_tokens ?? 0)
+  const inputTokens  = json.usage?.prompt_tokens     ?? 0
+  const outputTokens = json.usage?.completion_tokens ?? 0
   void logsSvc.insert({
     proxyId:            proxy.id,
     sourceModel:        proxy.sourceModel,
@@ -168,12 +154,12 @@ async function runPipeline(
     inputTokens,
     outputTokens,
     totalTokens:        inputTokens + outputTokens,
-    durationMs:         BigInt(Date.now() - durationMs),
-    timeToFirstTokenMs: 0n,
+    durationMs:         Date.now() - durationMs,
+    timeToFirstTokenMs: 0,
     isStream:           false,
     isSuccess:          resp.ok,
     errorMessage:       resp.ok ? "" : "upstream error",
-    createdAt:          BigInt(nowSec()),
+    createdAt:          nowSec(),
   })
 
   return new Response(JSON.stringify(json), {
@@ -224,14 +210,14 @@ async function logStream(
     sourceModel:        opts.proxy.sourceModel,
     targetModel:        opts.proxy.targetModel,
     upstream:           opts.proxy.upstream,
-    inputTokens:        BigInt(inputTokens),
-    outputTokens:       BigInt(outputTokens),
-    totalTokens:        BigInt(inputTokens + outputTokens),
-    durationMs:         BigInt(Date.now() - opts.durationMs),
-    timeToFirstTokenMs: 0n,
+    inputTokens,
+    outputTokens,
+    totalTokens:        inputTokens + outputTokens,
+    durationMs:         Date.now() - opts.durationMs,
+    timeToFirstTokenMs: 0,
     isStream:           true,
     isSuccess:          true,
     errorMessage:       "",
-    createdAt:          BigInt(nowSec()),
+    createdAt:          nowSec(),
   })
 }

@@ -1,68 +1,139 @@
 import { okAsync, errAsync, ResultAsync } from "neverthrow"
-import type { DB } from "../db/index.js"
-import { dbQuery } from "../db/index.js"
+import { gelQuery } from "@openzerg/common/gel"
+import type { GelClient } from "@openzerg/common/gel"
+import {
+  listProviderModelConfigs,
+  getProviderModelConfigById,
+  insertProviderModelConfig,
+  updateProviderModelConfig,
+  deleteProviderModelConfigById,
+} from "@openzerg/common/queries"
 import { NotFoundError, DbError } from "../errors.js"
-import type { ProviderModelConfig, ProviderModelConfigInsert, ProviderModelConfigUpdate } from "../entities/index.js"
-import { randomId, nowSec } from "./util.js"
+import { nowSec } from "./util.js"
 
 type ConfigError = NotFoundError | DbError
 
-export function createProviderModelConfigService(db: DB) {
+export interface ProviderModelConfigCreateInput {
+  providerId:        string
+  providerName:      string
+  modelId:           string
+  modelName:         string
+  upstream:          string
+  apiKey:            string
+  supportStreaming:  boolean
+  supportTools:      boolean
+  supportVision:     boolean
+  supportReasoning:  boolean
+  defaultMaxTokens:  number
+  contextLength:     number
+  autoCompactLength: number
+  enabled:           boolean
+}
+
+export interface ProviderModelConfigUpdateInput {
+  id:                string
+  providerName?:     string
+  modelName?:        string
+  upstream?:         string
+  apiKey?:           string
+  supportStreaming?: boolean
+  supportTools?:     boolean
+  supportVision?:    boolean
+  supportReasoning?: boolean
+  defaultMaxTokens?: number
+  contextLength?:    number
+  autoCompactLength?:number
+  enabled?:          boolean
+}
+
+interface ConfigRow {
+  id: string
+  providerId: string
+  providerName: string
+  modelId: string
+  modelName: string
+  upstream: string
+  apiKey: string
+  supportStreaming: boolean
+  supportTools: boolean
+  supportVision: boolean
+  supportReasoning: boolean
+  defaultMaxTokens: number
+  contextLength: number
+  autoCompactLength: number
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export function createProviderModelConfigService(gel: GelClient) {
   return {
-    list(enabledOnly: boolean): ResultAsync<ProviderModelConfig[], DbError> {
-      return dbQuery(() => {
-        let q = db.selectFrom("ai_proxy_provider_model_configs").selectAll()
-        if (enabledOnly) q = q.where("enabled", "=", true)
-        return q.execute()
-      })
+    list(enabledOnly: boolean): ResultAsync<ConfigRow[], DbError> {
+      return gelQuery(() =>
+        listProviderModelConfigs(gel, { enabledOnly: enabledOnly || undefined })
+      )
     },
 
-    get(id: string): ResultAsync<ProviderModelConfig, ConfigError> {
-      return dbQuery(() =>
-        db.selectFrom("ai_proxy_provider_model_configs").selectAll().where("id", "=", id).executeTakeFirst()
+    get(id: string): ResultAsync<ConfigRow, ConfigError> {
+      return gelQuery(() =>
+        getProviderModelConfigById(gel, { id })
       ).andThen(row =>
         row ? okAsync(row) : errAsync(new NotFoundError(`provider model config not found: ${id}`))
       )
     },
 
-    create(data: ProviderModelConfigInsert): ResultAsync<ProviderModelConfig, DbError> {
-      const id  = randomId()
-      const now = BigInt(nowSec())
-      return dbQuery(() =>
-        db.insertInto("ai_proxy_provider_model_configs")
-          .values({
-            id,
-            ...data,
-            autoCompactLength: data.autoCompactLength ??
-              Math.floor((data.contextLength ?? 0) * 0.9),
-            enabled:   true,
-            createdAt: now,
-            updatedAt: now,
-          })
-          .returningAll()
-          .executeTakeFirstOrThrow()
+    create(data: ProviderModelConfigCreateInput): ResultAsync<ConfigRow, DbError> {
+      const now = nowSec()
+      const autoCompactLength = data.autoCompactLength ?? Math.floor((data.contextLength ?? 0) * 0.9)
+      return gelQuery(() =>
+        insertProviderModelConfig(gel, {
+          providerId: data.providerId,
+          providerName: data.providerName,
+          modelId: data.modelId,
+          modelName: data.modelName,
+          upstream: data.upstream,
+          apiKey: data.apiKey,
+          supportStreaming: data.supportStreaming,
+          supportTools: data.supportTools,
+          supportVision: data.supportVision,
+          supportReasoning: data.supportReasoning,
+          defaultMaxTokens: data.defaultMaxTokens,
+          contextLength: data.contextLength,
+          autoCompactLength,
+          enabled: true,
+          createdAt: now,
+          updatedAt: now,
+        })
       )
     },
 
-    update(data: ProviderModelConfigUpdate): ResultAsync<ProviderModelConfig, ConfigError> {
-      const { id, ...fields } = data
-      const updates = Object.fromEntries(
-        Object.entries(fields).filter(([, v]) => v !== undefined)
-      )
-      return dbQuery(() =>
-        db.updateTable("ai_proxy_provider_model_configs")
-          .set({ ...updates, updatedAt: BigInt(nowSec()) })
-          .where("id", "=", id)
-          .returningAll()
-          .executeTakeFirst()
+    update(data: ProviderModelConfigUpdateInput): ResultAsync<ConfigRow, ConfigError> {
+      const now = nowSec()
+      return gelQuery(() =>
+        updateProviderModelConfig(gel, {
+          id: data.id,
+          updatedAt: now,
+          providerName: data.providerName ?? undefined,
+          modelName: data.modelName ?? undefined,
+          upstream: data.upstream ?? undefined,
+          apiKey: data.apiKey ?? undefined,
+          supportStreaming: data.supportStreaming ?? undefined,
+          supportTools: data.supportTools ?? undefined,
+          supportVision: data.supportVision ?? undefined,
+          supportReasoning: data.supportReasoning ?? undefined,
+          defaultMaxTokens: data.defaultMaxTokens ?? undefined,
+          contextLength: data.contextLength ?? undefined,
+          autoCompactLength: data.autoCompactLength ?? undefined,
+          enabled: data.enabled ?? undefined,
+        })
       ).andThen(row =>
-        row ? okAsync(row) : errAsync(new NotFoundError(`provider model config not found: ${id}`))
+        row ? okAsync(row) : errAsync(new NotFoundError(`provider model config not found: ${data.id}`))
       )
     },
 
     delete(id: string): ResultAsync<void, DbError> {
-      return dbQuery(() =>
-        db.deleteFrom("ai_proxy_provider_model_configs").where("id", "=", id).execute()
+      return gelQuery(() =>
+        deleteProviderModelConfigById(gel, { id })
       ).map(() => undefined)
     },
   }

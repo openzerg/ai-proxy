@@ -2,19 +2,19 @@ import { createServer } from "node:http"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { connectNodeAdapter } from "@connectrpc/connect-node"
 import { loadConfig } from "./config.js"
-import { openDB, autoMigrate } from "./db/index.js"
+import { createGelClient } from "@openzerg/common/gel"
+import type { GelClient } from "@openzerg/common/gel"
 import { createRouter } from "./api/server.js"
 import { createChatService } from "./service/chat.js"
 
 const cfg = loadConfig()
-const db  = openDB(cfg.databaseURL)
+const gel = createGelClient(cfg.gelDSN)
 
 async function main() {
-  await autoMigrate(cfg.databaseURL)
   console.log("[ai-proxy] database ready")
 
-  const router = createRouter(db)
-  const chatSvc = createChatService(db)
+  const router = createRouter(gel)
+  const chatSvc = createChatService(gel)
   const connectHandler = connectNodeAdapter({ routes: router })
 
   function setCORSHeaders(res: ServerResponse, origin: string) {

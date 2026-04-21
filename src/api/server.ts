@@ -1,26 +1,47 @@
 import { ConnectRouter } from "@connectrpc/connect"
 import { AiProxyService } from "@openzerg/common/gen/ai_proxy/v1_pb.js"
-import type { DB } from "../db/index.js"
-import { createProxyService, type ProxyJoined } from "../service/proxy.js"
-import { createProviderModelConfigService } from "../service/provider-model-config.js"
-import { createLogsService } from "../service/logs.js"
+import type { GelClient } from "@openzerg/common/gel"
+import { gelQuery } from "@openzerg/common/gel"
+import {
+  getProviderModelConfigForTest,
+  getProxyForTest,
+} from "@openzerg/common/queries"
+import { createProxyService, type ProxyJoined, type ProxyCreateInput, type ProxyUpdateInput } from "../service/proxy.js"
+import { createProviderModelConfigService, type ProviderModelConfigCreateInput, type ProviderModelConfigUpdateInput } from "../service/provider-model-config.js"
+import { createLogsService, type LogEntry } from "../service/logs.js"
 import { getProviders, getFlatModelsForProvider } from "../providers.js"
-import type { ProviderModelConfig } from "../entities/index.js"
 
 interface OpenAIChatResponse {
   choices?: Array<{ message?: { content?: string } }>
   error?: { message?: string }
 }
 
-export function createRouter(db: DB) {
-  const proxySvc  = createProxyService(db)
-  const configSvc = createProviderModelConfigService(db)
-  const logsSvc   = createLogsService(db)
+function logToEntry(log: LogEntry) {
+  return {
+    id:                log.id,
+    proxyId:           log.proxyId,
+    sourceModel:       log.sourceModel,
+    targetModel:       log.targetModel,
+    upstream:          log.upstream,
+    inputTokens:       BigInt(log.inputTokens),
+    outputTokens:      BigInt(log.outputTokens),
+    totalTokens:       BigInt(log.totalTokens),
+    durationMs:        BigInt(log.durationMs),
+    timeToFirstTokenMs:BigInt(log.timeToFirstTokenMs),
+    isStream:          log.isStream,
+    isSuccess:         log.isSuccess,
+    errorMessage:      log.errorMessage,
+    createdAt:         BigInt(log.createdAt),
+  }
+}
+
+export function createRouter(gel: GelClient) {
+  const proxySvc  = createProxyService(gel)
+  const configSvc = createProviderModelConfigService(gel)
+  const logsSvc   = createLogsService(gel)
 
   return (router: ConnectRouter) => {
     router.service(AiProxyService, {
-
-      // ── Proxy ────────────────────────────────────────────────────────────
 
       async listProxies(req) {
         const result = await proxySvc.list(req.enabledOnly)
@@ -42,9 +63,7 @@ export function createRouter(db: DB) {
           enabled: true,
         })
         if (created.isErr()) throw created.error
-        const joined = await proxySvc.get(created.value.id)
-        if (joined.isErr()) throw joined.error
-        return toProxyInfo(joined.value)
+        return toProxyInfo(created.value)
       },
 
       async updateProxy(req) {
@@ -55,9 +74,7 @@ export function createRouter(db: DB) {
           enabled: req.enabled,
         })
         if (result.isErr()) throw result.error
-        const joined = await proxySvc.get(result.value.id)
-        if (joined.isErr()) throw joined.error
-        return toProxyInfo(joined.value)
+        return toProxyInfo(result.value)
       },
 
       async deleteProxy(req) {
@@ -65,8 +82,6 @@ export function createRouter(db: DB) {
         if (result.isErr()) throw result.error
         return {}
       },
-
-      // ── ProviderModelConfig ───────────────────────────────────────────────
 
       async listProviderModelConfigs(req) {
         const result = await configSvc.list(req.enabledOnly)
@@ -127,8 +142,6 @@ export function createRouter(db: DB) {
         return {}
       },
 
-      // ── Provider templates (from models.dev) ──────────────────────────────
-
       async listProviders() {
         const result = await getProviders()
         if (result.isErr()) throw result.error
@@ -141,19 +154,17 @@ export function createRouter(db: DB) {
         return { models: result.value }
       },
 
-      // ── Logs & Stats ─────────────────────────────────────────────────────
-
       async queryLogs(req) {
         const result = await logsSvc.query({
           proxyId: req.proxyId || undefined,
-          fromTs:  req.fromTs  ? BigInt(req.fromTs)  : undefined,
-          toTs:    req.toTs    ? BigInt(req.toTs)    : undefined,
+          fromTs:  req.fromTs  ? Number(req.fromTs)  : undefined,
+          toTs:    req.toTs    ? Number(req.toTs)    : undefined,
           limit:   req.limit   || 50,
           offset:  req.offset  || 0,
         })
         if (result.isErr()) throw result.error
         return {
-          logs:  result.value.entries,
+          logs:  result.value.entries.map(logToEntry),
           total: BigInt(result.value.total),
         }
       },
@@ -161,18 +172,24 @@ export function createRouter(db: DB) {
       async getTokenStats(req) {
         const result = await logsSvc.tokenStats(
           req.proxyId || undefined,
-          req.fromTs ? BigInt(req.fromTs) : undefined,
-          req.toTs   ? BigInt(req.toTs)   : undefined,
+          req.fromTs ? Number(req.fromTs) : undefined,
+          req.toTs   ? Number(req.toTs)   : undefined,
         )
         if (result.isErr()) throw result.error
-        return result.value
+        return {
+          totalInputTokens:  BigInt(result.value.totalInputTokens),
+          totalOutputTokens: BigInt(result.value.totalOutputTokens),
+          totalTokens:       BigInt(result.value.totalTokens),
+          requestCount:      BigInt(result.value.requestCount),
+        }
       },
 
-      // ── Test ──────────────────────────────────────────────────────────────
-
       async testProviderModelConfig(req) {
-        const row = await db.selectFrom("ai_proxy_provider_model_configs")
-          .selectAll().where("id", "=", req.id).executeTakeFirst()
+        const result = await gelQuery(() =>
+          getProviderModelConfigForTest(gel, { id: req.id })
+        )
+        if (result.isErr()) return { success: false, message: result.error.message, statusCode: 500, latencyMs: 0 }
+        const row = result.value
         if (!row) return { success: false, message: "Config not found", statusCode: 404, latencyMs: 0 }
         if (!row.upstream) return { success: false, message: "No upstream URL", statusCode: 0, latencyMs: 0 }
         if (!row.apiKey) return { success: false, message: "No API key", statusCode: 0, latencyMs: 0 }
@@ -201,31 +218,23 @@ export function createRouter(db: DB) {
       },
 
       async testProxy(req) {
-        const row = await db.selectFrom("ai_proxy_proxies")
-          .innerJoin("ai_proxy_provider_model_configs", "ai_proxy_proxies.providerModelConfigId", "ai_proxy_provider_model_configs.id")
-          .select([
-            "ai_proxy_proxies.id",
-            "ai_proxy_proxies.sourceModel",
-            "ai_proxy_proxies.apiKey as proxyApiKey",
-            "ai_proxy_proxies.enabled",
-            "ai_proxy_provider_model_configs.upstream",
-            "ai_proxy_provider_model_configs.modelId",
-            "ai_proxy_provider_model_configs.apiKey as upstreamApiKey",
-          ])
-          .where("ai_proxy_proxies.id", "=", req.id)
-          .executeTakeFirst()
+        const result = await gelQuery(() =>
+          getProxyForTest(gel, { id: req.id })
+        )
+        if (result.isErr()) return { success: false, message: result.error.message, statusCode: 500, latencyMs: 0 }
+        const row = result.value
         if (!row) return { success: false, message: "Proxy not found", statusCode: 404, latencyMs: 0 }
         if (!row.enabled) return { success: false, message: "Proxy is disabled", statusCode: 0, latencyMs: 0 }
-        if (!row.upstream) return { success: false, message: "No upstream URL", statusCode: 0, latencyMs: 0 }
+        if (!row.providerModelConfig.upstream) return { success: false, message: "No upstream URL", statusCode: 0, latencyMs: 0 }
 
-        const apiKey = row.upstreamApiKey
+        const apiKey = row.providerModelConfig.apiKey
         const start = Date.now()
         try {
-          const resp = await fetch(`${row.upstream}/chat/completions`, {
+          const resp = await fetch(`${row.providerModelConfig.upstream}/chat/completions`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
             body: JSON.stringify({
-              model: row.modelId,
+              model: row.providerModelConfig.modelId,
               messages: [{ role: "user", content: "Say Hello World" }],
               max_tokens: 32,
             }),
@@ -270,7 +279,7 @@ function toProxyInfo(p: ProxyJoined) {
   }
 }
 
-function toConfigInfo(c: ProviderModelConfig) {
+function toConfigInfo(c: { id: string; providerId: string; providerName: string; modelId: string; modelName: string; upstream: string; apiKey: string; supportStreaming: boolean; supportTools: boolean; supportVision: boolean; supportReasoning: boolean; defaultMaxTokens: number; contextLength: number; autoCompactLength: number; enabled: boolean; createdAt: number; updatedAt: number }) {
   return {
     id:                c.id,
     providerId:        c.providerId,

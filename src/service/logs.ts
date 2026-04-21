@@ -1,83 +1,120 @@
 import { ResultAsync } from "neverthrow"
-import type { DB } from "../db/index.js"
-import { dbQuery } from "../db/index.js"
+import { gelQuery } from "@openzerg/common/gel"
+import type { GelClient } from "@openzerg/common/gel"
+import {
+  countLogs,
+  queryLogs,
+  tokenStats,
+  insertLog,
+} from "@openzerg/common/queries"
 import type { DbError } from "../errors.js"
-import type { Log } from "../entities/index.js"
-import { randomId } from "./util.js"
 
 export interface LogQuery {
   proxyId?: string
-  fromTs?:  bigint
-  toTs?:    bigint
+  fromTs?:  number
+  toTs?:    number
   limit?:   number
   offset?:  number
 }
 
 export interface LogStats {
-  totalInputTokens:  bigint
-  totalOutputTokens: bigint
-  totalTokens:       bigint
-  requestCount:      bigint
+  totalInputTokens:  number
+  totalOutputTokens: number
+  totalTokens:       number
+  requestCount:      number
 }
 
-export function createLogsService(db: DB) {
+export interface LogEntry {
+  id: string
+  proxyId: string
+  sourceModel: string
+  targetModel: string
+  upstream: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  durationMs: number
+  timeToFirstTokenMs: number
+  isStream: boolean
+  isSuccess: boolean
+  errorMessage: string
+  createdAt: number
+}
+
+export interface LogInsertInput {
+  proxyId:            string
+  sourceModel:        string
+  targetModel:        string
+  upstream:           string
+  inputTokens:        number
+  outputTokens:       number
+  totalTokens:        number
+  durationMs:         number
+  timeToFirstTokenMs: number
+  isStream:           boolean
+  isSuccess:          boolean
+  errorMessage:       string
+  createdAt:          number
+}
+
+export function createLogsService(gel: GelClient) {
   return {
-    query(req: LogQuery): ResultAsync<{ entries: Log[]; total: number }, DbError> {
-      return dbQuery(async () => {
-        let base = db.selectFrom("ai_proxy_logs")
-        if (req.proxyId) base = base.where("proxyId",   "=",  req.proxyId) as typeof base
-        if (req.fromTs)  base = base.where("createdAt", ">=", req.fromTs)  as typeof base
-        if (req.toTs)    base = base.where("createdAt", "<=", req.toTs)    as typeof base
+    query(req: LogQuery): ResultAsync<{ entries: LogEntry[]; total: number }, DbError> {
+      return gelQuery(async () => {
+        const countResult = await countLogs(gel, {
+          proxyId: req.proxyId ?? undefined,
+          fromTs: req.fromTs ?? undefined,
+          toTs: req.toTs ?? undefined,
+        })
 
-        const { count } = await base
-          .select(db.fn.countAll<number>().as("count"))
-          .executeTakeFirstOrThrow()
+        const entries = await queryLogs(gel, {
+          proxyId: req.proxyId ?? undefined,
+          fromTs: req.fromTs ?? undefined,
+          toTs: req.toTs ?? undefined,
+          limit: req.limit ?? 50,
+          offset: req.offset ?? 0,
+        })
 
-        const entries = await base
-          .selectAll()
-          .orderBy("createdAt", "desc")
-          .limit(req.limit  ?? 50)
-          .offset(req.offset ?? 0)
-          .execute()
-
-        return { entries, total: Number(count) }
+        return { entries, total: countResult.count }
       })
     },
 
     tokenStats(
       proxyId?: string,
-      fromTs?:  bigint,
-      toTs?:    bigint,
+      fromTs?:  number,
+      toTs?:    number,
     ): ResultAsync<LogStats, DbError> {
-      return dbQuery(async () => {
-        let q = db.selectFrom("ai_proxy_logs")
-        if (proxyId) q = q.where("proxyId",   "=",  proxyId) as typeof q
-        if (fromTs)  q = q.where("createdAt", ">=", fromTs)  as typeof q
-        if (toTs)    q = q.where("createdAt", "<=", toTs)    as typeof q
-
-        const row = await q
-          .select([
-            db.fn.sum<bigint>("inputTokens").as("totalInput"),
-            db.fn.sum<bigint>("outputTokens").as("totalOutput"),
-            db.fn.sum<bigint>("totalTokens").as("totalTokens"),
-            db.fn.countAll<bigint>().as("requestCount"),
-          ])
-          .executeTakeFirstOrThrow()
-
-        return {
-          totalInputTokens:  row.totalInput   ?? 0n,
-          totalOutputTokens: row.totalOutput  ?? 0n,
-          totalTokens:       row.totalTokens  ?? 0n,
-          requestCount:      row.requestCount ?? 0n,
-        }
-      })
+      return gelQuery(() =>
+        tokenStats(gel, {
+          proxyId: proxyId ?? undefined,
+          fromTs: fromTs ?? undefined,
+          toTs: toTs ?? undefined,
+        })
+      ).map(row => ({
+        totalInputTokens:  row.totalInput ?? 0,
+        totalOutputTokens: row.totalOutput ?? 0,
+        totalTokens:       row.totalTokens ?? 0,
+        requestCount:      row.requestCount ?? 0,
+      }))
     },
 
-    insert(entry: Omit<Log, "id">): ResultAsync<void, DbError> {
-      return dbQuery(() =>
-        db.insertInto("ai_proxy_logs")
-          .values({ id: randomId(), ...entry })
-          .execute()
+    insert(entry: LogInsertInput): ResultAsync<void, DbError> {
+      return gelQuery(() =>
+        insertLog(gel, {
+          proxyId: entry.proxyId,
+          sourceModel: entry.sourceModel,
+          targetModel: entry.targetModel,
+          upstream: entry.upstream,
+          inputTokens: entry.inputTokens,
+          outputTokens: entry.outputTokens,
+          totalTokens: entry.totalTokens,
+          durationMs: entry.durationMs,
+          timeToFirstTokenMs: entry.timeToFirstTokenMs,
+          isStream: entry.isStream,
+          isSuccess: entry.isSuccess,
+          errorMessage: entry.errorMessage,
+          createdAt: entry.createdAt,
+        })
       ).map(() => undefined)
     },
   }
